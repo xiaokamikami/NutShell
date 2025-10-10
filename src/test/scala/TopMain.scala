@@ -22,7 +22,7 @@ import circt.stage._
 import device.AXI4VGA
 import difftest.DifftestModule
 import nutcore.NutCoreConfig
-import sim.SimTop
+import sim.{SimTop, FpgaSimTop}
 import system.NutShell
 
 class Top extends Module {
@@ -37,11 +37,31 @@ class Top extends Module {
 }
 
 class FpgaDiffTop extends Module {
-  override lazy val desiredName: String = "SimTop"
+  override lazy val desiredName = "SimTop"
   lazy val config = NutCoreConfig(FPGADifftest = true)
   val soc = Module(new NutShell()(config))
-  val io = IO(soc.io.cloneType)
-  soc.io <> io
+
+  val io = IO(new Bundle {
+    val xdma_axis = new xdma.AxisBundle(dataWidth = 512)
+    val soc  = FpgaDiffTop.this.soc.io.cloneType
+  })
+  soc.io <> io.soc
+
+  val xdma_axis2axi4 = Module(new xdma.XDMA_AxisToAxi4())
+  xdma_axis2axi4.io.axis <> io.xdma_axis
+
+  val axi4_arbiter = Module(new xdma.AXI4Arbiter())
+  axi4_arbiter.io.in(0) <> soc.io.mem
+  axi4_arbiter.io.in(1).aw <> xdma_axis2axi4.io.aw
+  axi4_arbiter.io.in(1).w  <> xdma_axis2axi4.io.w
+  axi4_arbiter.io.in(1).b  <> xdma_axis2axi4.io.b
+  axi4_arbiter.io.in(1).ar.valid := false.B
+  axi4_arbiter.io.in(1).ar.bits  := 0.U.asTypeOf(axi4_arbiter.io.in(0).ar.bits)
+  axi4_arbiter.io.in(1).r.ready  := false.B
+  axi4_arbiter.io.in(1).ar <> DontCare
+  axi4_arbiter.io.in(1).r  <> DontCare
+
+  axi4_arbiter.io.out <> io.soc.mem
 
   val difftest = DifftestModule.finish("nutshell")
   dontTouch(soc.io)
@@ -63,6 +83,7 @@ object TopMain extends App {
     case "pynq"   => PynqSettings()
     case "axu3cg" => Axu3cgSettings()
     case "fpgadiff" => FpgaDiffSettings()
+    case "fpgasim"  => Nil
     case "PXIe"   => PXIeSettings()
   } ) ++ ( core match {
     case "inorder"  => InOrderSettings()
@@ -82,6 +103,8 @@ object TopMain extends App {
     ChiselGeneratorAnnotation(() => new SimTop)
   } else if (board == "fpgadiff") {
     ChiselGeneratorAnnotation(() => new FpgaDiffTop)
+  } else if (board == "fpgasim") {
+    ChiselGeneratorAnnotation(() => new FpgaSimTop)
   }
   else {
     ChiselGeneratorAnnotation(() => new Top)
