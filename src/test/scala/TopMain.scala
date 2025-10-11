@@ -21,8 +21,10 @@ import chisel3.stage.ChiselGeneratorAnnotation
 import circt.stage._
 import device.AXI4VGA
 import difftest.DifftestModule
+import difftest.fpga._
+import difftest.fpga.xdma._
 import nutcore.NutCoreConfig
-import sim.SimTop
+import sim.{SimTop,FpgaSimTop}
 import system.NutShell
 
 class Top extends Module {
@@ -37,14 +39,35 @@ class Top extends Module {
 }
 
 class FpgaDiffTop extends Module {
-  override lazy val desiredName: String = "SimTop"
+  override lazy val desiredName = "SimTop"
   lazy val config = NutCoreConfig(FPGADifftest = true)
   val soc = Module(new NutShell()(config))
-  val io = IO(soc.io.cloneType)
-  soc.io <> io
+  // AXI-stream data width for HostEndpoint (match default HostEndpoint)
+  val axisDataWidth = 512
+  // Top IO: core IO + AXI-stream interface
+  val io = IO(new Bundle {
+    val core = soc.io.cloneType
+    // Sink AXI-stream interface: host endpoint drives host_c2h_axis
+    val host_c2h_axis = new AxisMasterBundle(axisDataWidth)
+    // Expose core clock enable from HostEndpoint
+    val core_clock_enable = Output(Bool())
+  })
+  // Connect core IO
+  soc.io <> io.core
 
-  val difftest = DifftestModule.finish("nutshell")
-  dontTouch(soc.io)
+    // Instantiate HostEndpoint to wrap VerilogDifftest2AXI
+  val host = Module(new HostEndpoint())
+  // Collect FPGA diff-test IO bundle and expose as IO
+  val difftest = DifftestModule.collect("nutshell")
+  val fpgaDifftest = difftest.fpgaIO.get
+  // Connect diff-test data and enable to HostEndpoint without exposing top IO
+  host.io.difftest_data   := fpgaDifftest.data
+  host.io.difftest_enable := fpgaDifftest.enable
+  io.host_c2h_axis <> host.io.host_c2h_axis
+  // Preserve control output
+  io.core_clock_enable := host.io.core_clock_enable
+
+  dontTouch(io.core)
 }
 
 object TopMain extends App {
@@ -63,6 +86,7 @@ object TopMain extends App {
     case "pynq"   => PynqSettings()
     case "axu3cg" => Axu3cgSettings()
     case "fpgadiff" => FpgaDiffSettings()
+    case "fpgasim"  => Nil
     case "PXIe"   => PXIeSettings()
   } ) ++ ( core match {
     case "inorder"  => InOrderSettings()
@@ -82,6 +106,8 @@ object TopMain extends App {
     ChiselGeneratorAnnotation(() => new SimTop)
   } else if (board == "fpgadiff") {
     ChiselGeneratorAnnotation(() => new FpgaDiffTop)
+  } else if (board == "fpgasim") {
+    ChiselGeneratorAnnotation(() => new FpgaSimTop)
   }
   else {
     ChiselGeneratorAnnotation(() => new Top)
